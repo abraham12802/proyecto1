@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voz → Servidor (local)</title>
+<style>
+  body { font-family: system-ui, sans-serif; padding: 16px; }
+  #status { margin-top: 12px; padding: 8px; border-radius: 8px; background:#f3f4f6; }
+  button, label { display:inline-block; padding:10px 14px; border-radius:8px; border:0; background:#111827; color:#fff; }
+  button:disabled { opacity: 0.6; }
+  .row { display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  code { background:#eee; padding:2px 6px; border-radius:6px; }
+</style>
+</head>
+<body>
+  <h2>Voz desde Android → Ubuntu (Ollama)</h2>
+
+  <div class="row">
+    <strong>API:</strong> <code id="apiShow"></code>
+    <button id="btnPing">Probar conexión</button>
+  </div>
+
+  <!-- Truco: input file con accept=audio/* y capture, abre grabador nativo de Android en HTTP -->
+  <input id="audioInput" type="file" accept="audio/*" capture style="display:none" />
+  <label for="audioInput" id="recordBtn">🎙️ Grabar y enviar</label>
+
+  <div id="status">Listo para grabar.</div>
+  <pre id="out" style="white-space:pre-wrap;margin-top:12px;"></pre>
+
+<script>
+const HOST = "http://192.168.0.12:8000";
+const PING = HOST + "/ping";
+const API  = HOST + "/voice-intent";
+
+const btnPing   = document.getElementById('btnPing');
+const recordBtn = document.getElementById('recordBtn');
+const audioInput= document.getElementById('audioInput');
+const statusEl  = document.getElementById('status');
+const outEl     = document.getElementById('out');
+
+function show(msg){ statusEl.textContent = msg; }
+function explainError(err){ return (err && (err.message||err.name)) ? (err.name+": "+err.message) : String(err); }
+
+// 1) Prueba GET /ping
+btnPing.addEventListener('click', async () => {
+  show("🔎 Probando /ping…");
+  try {
+    const r = await fetch(PING);
+    if (!r.ok) throw new Error("HTTP "+r.status);
+    const j = await r.json();
+    show("✅ /ping OK");
+    outEl.textContent = JSON.stringify(j, null, 2);
+  } catch(e) {
+    show("❌ /ping falló");
+    outEl.textContent = explainError(e);
+  }
+});
+
+// 2) Botón de grabar (abre grabadora nativa)
+recordBtn.addEventListener('click', () => {
+  show("🎤 Abriendo grabadora… (al guardar volverás aquí)");
+});
+
+// Utilidad: POST con XHR (muestra progreso y errores reales de red)
+function postFormData(url, formData){
+  return new Promise((resolve, reject)=>{
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url, true);
+    xhr.timeout = 120000; // 120s
+    xhr.upload.onprogress = (e)=>{
+      if (e.lengthComputable){
+        const pct = Math.round(100*e.loaded/e.total);
+        show("⬆️ Subiendo… "+pct+"%");
+      } else {
+        show("⬆️ Subiendo…");
+      }
+    };
+    xhr.onload = ()=>{
+      if (xhr.status>=200 && xhr.status<300) resolve(xhr.responseText);
+      else reject(new Error("HTTP "+xhr.status+" "+(xhr.responseText||"")));
+    };
+    xhr.onerror = ()=> reject(new Error("Network error (onerror)"));
+    xhr.ontimeout = ()=> reject(new Error("Timeout"));
+    xhr.send(formData);
+  });
+}
+
+// 2.a) TEST POST simple (sin archivo) — para descartar problemas de red/CORS en POST
+async function testPostSimple(){
+  try{
+    const fd = new FormData();
+    const blob = new Blob(["hola"], {type:"text/plain"});
+    fd.append("audio", blob, "test.txt");
+    const respText = await postFormData(API, fd);
+    show("✅ POST simple OK");
+    try { outEl.textContent = JSON.stringify(JSON.parse(respText), null, 2); }
+    catch { outEl.textContent = respText; }
+  }catch(e){
+    show("❌ POST simple falló");
+    outEl.textContent = explainError(e);
+  }
+}
+
+// Al volver con el archivo grabado
+audioInput.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file){ show("No se seleccionó audio."); return; }
+
+  // Sugerencia: muchos grabadores generan M4A/3GP grandes. Limitemos pruebas.
+  if (file.size > 15*1024*1024){
+    show("⚠️ Archivo grande ("+Math.round(file.size/1024/1024)+" MB). Intenta una grabación corta.");
+    // Aun así intentaremos subir…
+  } else {
+    show("⬆️ Enviando audio al servidor…");
+  }
+
+  recordBtn.setAttribute('disabled','disabled');
+  try{
+
+    // 3) Ahora sí, mandamos tu archivo de audio
+    const fd = new FormData();
+    fd.append("audio", file, file.name || "audio.webm");
+    const respText = await postFormData(API, fd);
+    show("✅ Audio enviado y servidor respondió.");
+    try { outEl.textContent = JSON.stringify(JSON.parse(respText), null, 2); }
+    catch { outEl.textContent = respText; }
+  }catch(e){
+    show("❌ Error enviando al servidor");
+    outEl.textContent = explainError(e);
+  }finally{
+    recordBtn.removeAttribute('disabled');
+    audioInput.value = "";
+  }
+});
+</script>
+
+</body>
+</html>
