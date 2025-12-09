@@ -4,7 +4,7 @@
 const char* ssid = "abraham-2.4";
 const char* password = "Tecsup2024";
 
-const char* mqtt_server = "192.168.0.12";  // Broker MQTT
+const char* mqtt_server = "192.168.0.63";  // Broker MQTT
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -103,3 +103,4 @@ void loop() {
   if (!client.connected()) reconnect();
   client.loop();
 }
+
