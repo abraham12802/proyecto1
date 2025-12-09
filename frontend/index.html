@@ -5,20 +5,40 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Voz → Servidor (local)</title>
 <style>
-  body { font-family: system-ui, sans-serif; padding: 16px; }
-  #status { margin-top: 12px; padding: 8px; border-radius: 8px; background:#f3f4f6; }
-  button, label { display:inline-block; padding:10px 14px; border-radius:8px; border:0; background:#111827; color:#fff; }
-  button:disabled { opacity: 0.6; }
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; padding: 16px; background: #f8fafc; color: #0f172a; }
+  h2 { margin-bottom: 4px; }
+  small { color: #475569; }
+  #status { margin-top: 12px; padding: 10px 12px; border-radius: 12px; background:#e2e8f0; border:1px solid #cbd5e1; }
+  button, label { display:inline-flex; gap:6px; align-items:center; padding:10px 14px; border-radius:10px; border:0; background:#111827; color:#fff; cursor:pointer; }
+  button:disabled, label:disabled { opacity: 0.55; cursor: not-allowed; }
   .row { display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
-  code { background:#eee; padding:2px 6px; border-radius:6px; }
+  .card { background:#fff; border:1px solid #e2e8f0; border-radius:12px; padding:12px; margin-top:12px; box-shadow:0 6px 20px rgba(15,23,42,0.06); }
+  .muted { color:#475569; }
+  code { background:#e2e8f0; padding:2px 6px; border-radius:6px; }
+  input[type="text"] { padding: 8px 10px; border-radius: 8px; border: 1px solid #cbd5e1; width: min(360px, 100%); }
+  #timeline { list-style:none; padding:0; margin:0; display:flex; gap:8px; flex-wrap:wrap; }
+  #timeline li { background:#e2e8f0; border-radius:8px; padding:6px 8px; font-size: 12px; }
+  pre { white-space: pre-wrap; background:#0b1021; color:#e2e8f0; border-radius: 12px; padding: 10px; overflow:auto; }
 </style>
 </head>
 <body>
   <h2>Voz desde Android → Ubuntu (Ollama)</h2>
+  <small>Graba desde el navegador, envía a FastAPI y consulta Qwen → MQTT → ESP32</small>
 
-  <div class="row">
-    <strong>API:</strong> <code id="apiShow"></code>
-    <button id="btnPing">Probar conexión</button>
+  <div class="card">
+    <div class="row">
+      <label for="hostInput">Servidor API:</label>
+      <input id="hostInput" type="text" placeholder="http://192.168.x.x:8000" />
+      <button id="btnSaveHost">Guardar</button>
+    </div>
+    <div class="row">
+      <strong>Ping:</strong> <code id="pingShow"></code>
+      <strong>Voice:</strong> <code id="apiShow"></code>
+      <button id="btnPing">Probar conexión</button>
+      <button id="btnTestPost">Test POST sin audio</button>
+    </div>
+    <ul id="timeline"></ul>
   </div>
 
   <!-- Truco: input file con accept=audio/* y capture, abre grabador nativo de Android en HTTP -->
@@ -26,27 +46,67 @@
   <label for="audioInput" id="recordBtn">🎙️ Grabar y enviar</label>
 
   <div id="status">Listo para grabar.</div>
-  <pre id="out" style="white-space:pre-wrap;margin-top:12px;"></pre>
+  <pre id="out" style="margin-top:12px;"></pre>
 
 <script>
-const HOST = "http://192.168.0.12:8000";
-const PING = HOST + "/ping";
-const API  = HOST + "/voice-intent";
+const DEFAULT_HOST = "http://192.168.0.12:8000";
+let HOST = localStorage.getItem('apiHost') || DEFAULT_HOST;
+let PING = "";
+let API  = "";
 
-const btnPing   = document.getElementById('btnPing');
-const recordBtn = document.getElementById('recordBtn');
-const audioInput= document.getElementById('audioInput');
-const statusEl  = document.getElementById('status');
-const outEl     = document.getElementById('out');
+const btnPing    = document.getElementById('btnPing');
+const btnTestPost= document.getElementById('btnTestPost');
+const recordBtn  = document.getElementById('recordBtn');
+const audioInput = document.getElementById('audioInput');
+const statusEl   = document.getElementById('status');
+const outEl      = document.getElementById('out');
+const apiShow    = document.getElementById('apiShow');
+const pingShow   = document.getElementById('pingShow');
+const hostInput  = document.getElementById('hostInput');
+const btnSaveHost= document.getElementById('btnSaveHost');
+const timelineEl = document.getElementById('timeline');
+
+function setHost(newHost){
+  HOST = newHost.replace(/\/$/, '');
+  PING = HOST + "/ping";
+  API  = HOST + "/voice-intent";
+  apiShow.textContent  = API;
+  pingShow.textContent = PING;
+}
+
+function pushTimeline(label){
+  const li = document.createElement('li');
+  li.textContent = `${new Date().toLocaleTimeString()} · ${label}`;
+  timelineEl.prepend(li);
+  const items = timelineEl.querySelectorAll('li');
+  if (items.length > 6) items[items.length-1].remove();
+}
 
 function show(msg){ statusEl.textContent = msg; }
 function explainError(err){ return (err && (err.message||err.name)) ? (err.name+": "+err.message) : String(err); }
 
+// init
+hostInput.value = HOST;
+setHost(HOST);
+
+btnSaveHost.addEventListener('click', ()=>{
+  const candidate = hostInput.value.trim();
+  if (!candidate.startsWith('http')){
+    show('Introduce un host válido (http://...)');
+    return;
+  }
+  localStorage.setItem('apiHost', candidate);
+  setHost(candidate);
+  pushTimeline('Host actualizado');
+  show('Host guardado.');
+});
+
 // 1) Prueba GET /ping
 btnPing.addEventListener('click', async () => {
+  pushTimeline('Probar /ping');
   show("🔎 Probando /ping…");
   try {
-    const r = await fetch(PING);
+    const r = await fetch(PING, { cache: 'no-store' });
     if (!r.ok) throw new Error("HTTP "+r.status);
     const j = await r.json();
     show("✅ /ping OK");
@@ -55,6 +115,11 @@ btnPing.addEventListener('click', async () => {
     show("❌ /ping falló");
     outEl.textContent = explainError(e);
   }
+});
+
+btnTestPost.addEventListener('click', async () => {
+  pushTimeline('Test POST sin audio');
+  await testPostSimple();
 });
 
 // 2) Botón de grabar (abre grabadora nativa)
@@ -94,10 +159,12 @@ async function testPostSimple(){
     fd.append("audio", blob, "test.txt");
     const respText = await postFormData(API, fd);
     show("✅ POST simple OK");
+    pushTimeline('POST simple OK');
     try { outEl.textContent = JSON.stringify(JSON.parse(respText), null, 2); }
     catch { outEl.textContent = respText; }
   }catch(e){
     show("❌ POST simple falló");
+    pushTimeline('POST simple falló');
     outEl.textContent = explainError(e);
   }
 }
@@ -105,17 +172,20 @@ async function testPostSimple(){
 // Al volver con el archivo grabado
 audioInput.addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
-  if (!file){ show("No se seleccionó audio."); return; }
+  if (!file){ show("No se seleccion audio."); return; }
 
   // Sugerencia: muchos grabadores generan M4A/3GP grandes. Limitemos pruebas.
   if (file.size > 15*1024*1024){
     show("⚠️ Archivo grande ("+Math.round(file.size/1024/1024)+" MB). Intenta una grabación corta.");
+    pushTimeline('Archivo grande');
     // Aun así intentaremos subir…
   } else {
     show("⬆️ Enviando audio al servidor…");
   }
 
   recordBtn.setAttribute('disabled','disabled');
+  btnPing.setAttribute('disabled','disabled');
+  btnTestPost.setAttribute('disabled','disabled');
   try{
 
     // 3) Ahora sí, mandamos tu archivo de audio
@@ -123,13 +193,17 @@ audioInput.addEventListener('change', async (e) => {
     fd.append("audio", file, file.name || "audio.webm");
     const respText = await postFormData(API, fd);
     show("✅ Audio enviado y servidor respondió.");
+    pushTimeline('Audio enviado');
     try { outEl.textContent = JSON.stringify(JSON.parse(respText), null, 2); }
     catch { outEl.textContent = respText; }
   }catch(e){
     show("❌ Error enviando al servidor");
+    pushTimeline('Error en envío');
     outEl.textContent = explainError(e);
   }finally{
     recordBtn.removeAttribute('disabled');
+    btnPing.removeAttribute('disabled');
+    btnTestPost.removeAttribute('disabled');
     audioInput.value = "";
   }
 });
