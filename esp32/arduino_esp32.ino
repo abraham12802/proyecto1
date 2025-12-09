@@ -4,7 +4,12 @@
 const char* ssid = "abraham-2.4";
 const char* password = "Tecsup2024";
 
+// Debe coincidir con la IP/host configurada en el backend FastAPI (MQTT_SERVER)
 const char* mqtt_server = "192.168.0.12";  // Broker MQTT
+
+// Topics alineados con los valores por defecto del backend (MQTT_TOPIC_LED/MQTT_TOPIC_RGB)
+const char* TOPIC_LED = "casa/esp32/led";
+const char* TOPIC_RGB = "casa/esp32/rgb";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -23,9 +28,25 @@ void setRGB(bool r, bool g, bool b) {
   digitalWrite(B_PIN, b ? HIGH : LOW);
 }
 
+void setMoodColor(const String &mood) {
+  // Payload esperado: HAPPY, SAD o NEUTRAL (en mayúsculas)
+  if (mood == "HAPPY") {
+    // Amarillo (rojo + verde)
+    setRGB(true, true, false);
+  } else if (mood == "SAD") {
+    // Azul
+    setRGB(false, false, true);
+  } else {
+    // NEUTRAL u otra cosa => apagar
+    setRGB(false, false, false);
+  }
+}
+
 void callback(char* topic, byte* payload, unsigned int length) {
   String msg;
   for (int i = 0; i < length; i++) msg += (char)payload[i];
+  msg.trim();
+  msg.toUpperCase();
 
   String top = String(topic);
 
@@ -35,7 +56,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println(msg);
 
   // ----- Control LED simple -----
-  if (top == "casa/esp32/led") {
+  if (top == TOPIC_LED) {
     if (msg == "ON") {
       digitalWrite(LED_PIN, HIGH);
     } else if (msg == "OFF") {
@@ -44,19 +65,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
 
   // ----- Control RGB por estado de ánimo -----
-  else if (top == "casa/esp32/rgb") {
-    // HAPPY: color alegre (amarillo: rojo + verde)
-    if (msg == "HAPPY") {
-      setRGB(true, true, false);
-    }
-    // SAD: color triste (azul)
-    else if (msg == "SAD") {
-      setRGB(false, false, true);
-    }
-    // NEUTRAL: apagar todo
-    else if (msg == "NEUTRAL") {
-      setRGB(false, false, false);
-    }
+  else if (top == TOPIC_RGB) {
+    setMoodColor(msg);
   }
 }
 
@@ -65,8 +75,12 @@ void reconnect() {
     Serial.print("Intentando conectar MQTT...");
     if (client.connect("ESP32Client")) {
       Serial.println("conectado.");
-      client.subscribe("casa/esp32/led");
-      client.subscribe("casa/esp32/rgb");
+      client.subscribe(TOPIC_LED);
+      client.subscribe(TOPIC_RGB);
+      Serial.print("Suscrito a LED en: ");
+      Serial.println(TOPIC_LED);
+      Serial.print("Suscrito a RGB en: ");
+      Serial.println(TOPIC_RGB);
     } else {
       Serial.print("falló, rc=");
       Serial.print(client.state());
@@ -95,11 +109,5 @@ void setup() {
   }
   Serial.println("\nWiFi conectado.");
 
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(callback);
-}
+frontend/index.html
 
-void loop() {
-  if (!client.connected()) reconnect();
-  client.loop();
-}
