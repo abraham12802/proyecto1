@@ -2,13 +2,15 @@
 # analiza intención con Qwen2 7B Instruct Q4 (Ollama)
 # y envía comandos a un ESP32 usando MQTT (LED + RGB estado de ánimo).
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import os
 import subprocess
 import json
 import textwrap
+import time
+from typing import Optional
 
 # --- Whisper ---
 from whisper_timestamped import load_model, transcribe
@@ -16,21 +18,30 @@ from whisper_timestamped import load_model, transcribe
 # --- MQTT ---
 import paho.mqtt.client as mqtt
 
-# ===== CONFIGURACIÓN MQTT =====
-MQTT_SERVER = "192.168.0.12"          # IP de tu broker (Ubuntu)
-MQTT_PORT = 1883
-MQTT_TOPIC_LED = "casa/esp32/led"     # Topic para LED simple
-MQTT_TOPIC_RGB = "casa/esp32/rgb"     # Topic para RGB (emociones)
+# ===== CONFIGURACIÓN (variables de entorno con fallback) =====
+MQTT_SERVER = os.getenv("MQTT_SERVER", "192.168.0.12")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_TOPIC_LED = os.getenv("MQTT_TOPIC_LED", "casa/esp32/led")
+MQTT_TOPIC_RGB = os.getenv("MQTT_TOPIC_RGB", "casa/esp32/rgb")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2:7b-instruct-q4_0")
+AUDIO_SAVE_DIR = os.getenv("AUDIO_SAVE_DIR", "/home/abraham/audios_recibidos")
+MAX_AUDIO_MB = int(os.getenv("MAX_AUDIO_MB", "25"))
 
 # Crear cliente MQTT global
 mqtt_client = mqtt.Client()
-try:
-    print("Intentando conectar a MQTT...")
-    mqtt_client.connect(MQTT_SERVER, MQTT_PORT, 60)
-    mqtt_client.loop_start()  # <<< IMPORTANTE: inicia el hilo de red
-    print(f"Conectado a MQTT en {MQTT_SERVER}:{MQTT_PORT}")
-except Exception as e:
-    print("ERROR: No se pudo conectar al broker MQTT:", e)
+
+def connect_mqtt():
+    try:
+        print(f"Intentando conectar a MQTT {MQTT_SERVER}:{MQTT_PORT}...")
+        mqtt_client.connect(MQTT_SERVER, MQTT_PORT, 60)
+        mqtt_client.loop_start()  # <<< IMPORTANTE: inicia el hilo de red
+        print(f"Conectado a MQTT en {MQTT_SERVER}:{MQTT_PORT}")
+        return True
+    except Exception as e:
+        print("ERROR: No se pudo conectar al broker MQTT:", e)
+        return False
+
+mqtt_connected = connect_mqtt()
 
 app = FastAPI()
 
@@ -56,34 +67,43 @@ def root():
 
 @app.get("/ping")
 def ping():
-    return {"pong": True}
+    return {
+        "pong": True,
+        "mqtt_connected": mqtt_connected,
+        "mqtt_server": MQTT_SERVER,
+        "model": OLLAMA_MODEL,
+    }
 
 
-def call_ollama_qwen2(prompt: str) -> str:
+def call_ollama_qwen2(prompt: str, timeout: int = 120) -> str:
     """
     Envía el prompt a Ollama usando stdin (echo | ollama run).
     Funciona incluso en versiones sin soporte para -p.
     """
-    process = subprocess.Popen(
-        ["ollama", "run", "qwen2:7b-instruct-q4_0"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-    out, err = process.communicate(prompt)
+    try:
+        process = subprocess.run(
+            ["ollama", "run", OLLAMA_MODEL],
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return "{""error"": ""timeout""}"
 
-    if err:
-        print("OLLAMA STDERR:", err)
+    if process.stderr:
+        print("OLLAMA STDERR:", process.stderr)
 
-    return out.strip()
+    return process.stdout.strip()
 
 
-def extract_json(text: str):
+def extract_json(text: str) -> Optional[dict]:
     """
     Intenta extraer un objeto JSON { ... } de un texto,
     por si el modelo añade texto antes o después.
     """
+    if not text:
+        return None
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -102,6 +122,8 @@ def send_mqtt_led(action: str) -> bool:
     action: 'LED_ON' o 'LED_OFF'
     Publica en el topic MQTT_TOPIC_LED con payload 'ON' o 'OFF'.
     """
+    if not mqtt_connected:
+        return False
     try:
         if action == "LED_ON":
             result = mqtt_client.publish(MQTT_TOPIC_LED, "ON")
@@ -125,6 +147,8 @@ def send_mqtt_rgb(action: str) -> bool:
       - 'RGB_TRISTE'  -> payload 'SAD'
       - 'RGB_NEUTRAL' -> payload 'NEUTRAL' (apagar o color neutro)
     """
+    if not mqtt_connected:
+        return False
     try:
         payload = None
         if action == "RGB_ALEGRE":
@@ -147,7 +171,7 @@ def send_mqtt_rgb(action: str) -> bool:
 @app.post("/voice-intent")
 async def voice_intent(audio: UploadFile = File(...)):
     # Ruta donde se guardarán los audios
-    save_dir = "/home/abraham/audios_recibidos"
+    save_dir = AUDIO_SAVE_DIR
     os.makedirs(save_dir, exist_ok=True)
 
     # Crear nombre único con fecha y hora
@@ -156,8 +180,15 @@ async def voice_intent(audio: UploadFile = File(...)):
     file_path = os.path.join(save_dir, filename)
 
     # Leer y guardar el contenido
+    content = await audio.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Archivo vacío")
+
+    max_bytes = MAX_AUDIO_MB * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"Archivo supera {MAX_AUDIO_MB} MB")
+
     with open(file_path, "wb") as f:
-        content = await audio.read()
         f.write(content)
 
     # Detectar tipo de contenido (por si algún día llega algo que no es audio)
@@ -166,6 +197,7 @@ async def voice_intent(audio: UploadFile = File(...)):
 
     # --- Transcribir audio con Whisper ---
     texto_transcrito = ""
+    t0 = time.time()
     if es_audio:
         try:
             result = transcribe(whisper_model, file_path)
@@ -176,6 +208,7 @@ async def voice_intent(audio: UploadFile = File(...)):
     else:
         print(f"Archivo no es audio (content_type={content_type}), se omite Whisper.")
         texto_transcrito = ""
+    t1 = time.time()
 
     # --- Llamada a Qwen2 con el texto transcrito ---
     prompt = textwrap.dedent(f"""
@@ -270,5 +303,7 @@ async def voice_intent(audio: UploadFile = File(...)):
         "ia_raw": ia_raw,       # respuesta completa del modelo
         "ia_json": ia_json,     # JSON parseado (o null si algo falla)
         "accion_mqtt_led": accion_mqtt_led,
-        "accion_mqtt_rgb": accion_mqtt_rgb
+        "accion_mqtt_rgb": accion_mqtt_rgb,
+        "mqtt_connected": mqtt_connected,
+        "latencia_whisper_seg": round(t1 - t0, 3),
     }
