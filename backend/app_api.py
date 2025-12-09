@@ -9,6 +9,7 @@ import os
 import subprocess
 import json
 import textwrap
+import requests
 
 # --- Whisper ---
 from whisper_timestamped import load_model, transcribe
@@ -16,8 +17,30 @@ from whisper_timestamped import load_model, transcribe
 # --- MQTT ---
 import paho.mqtt.client as mqtt
 
+# ===== FUNCIÓN TTS (Texto a voz con espeak-ng) =====
+def speak_text(text: str):
+    """
+    Convierte texto a voz usando espeak-ng y lo reproduce por el altavoz del servidor.
+    Requiere tener instalado en Ubuntu:
+      sudo apt install espeak-ng alsa-utils
+    """
+    if not text:
+        return
+
+    text = text.strip()
+    if len(text) > 300:
+        text = text[:300] + " ..."
+
+    # Voz español latino (-v es-la). Puedes cambiar el texto cuando quieras.
+    cmd = f'espeak-ng -v es-la "{text}" --stdout | aplay'
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+    except Exception as e:
+        print("[TTS] Error al reproducir voz:", e)
+
+
 # ===== CONFIGURACIÓN MQTT =====
-MQTT_SERVER = "192.168.0.12"          # IP de tu broker (Ubuntu)
+MQTT_SERVER = "192.168.0.63"          # IP de tu broker (Ubuntu)
 MQTT_PORT = 1883
 MQTT_TOPIC_LED = "casa/esp32/led"     # Topic para LED simple
 MQTT_TOPIC_RGB = "casa/esp32/rgb"     # Topic para RGB (emociones)
@@ -59,25 +82,29 @@ def ping():
     return {"pong": True}
 
 
+# Nombre del modelo Ollama (pon aquí el que TÚ quieras usar)
+OLLAMA_MODEL = "qwen2:1.5b-instruct"
+
 def call_ollama_qwen2(prompt: str) -> str:
     """
-    Envía el prompt a Ollama usando stdin (echo | ollama run).
-    Funciona incluso en versiones sin soporte para -p.
+    Envía el prompt a Ollama usando la API HTTP.
+    Mucho más rápido que lanzar 'ollama run' con subprocess.
     """
-    process = subprocess.Popen(
-        ["ollama", "run", "qwen2:7b-instruct-q4_0"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-    out, err = process.communicate(prompt)
-
-    if err:
-        print("OLLAMA STDERR:", err)
-
-    return out.strip()
-
+    try:
+        url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,  # para que devuelva todo junto
+        }
+        resp = requests.post(url, json=payload, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        # En la API de Ollama, el texto viene normalmente en 'response'
+        return data.get("response", "").strip()
+    except Exception as e:
+        print("Error llamando a Ollama vía HTTP:", e)
+        return ""
 
 def extract_json(text: str):
     """
@@ -260,6 +287,32 @@ async def voice_intent(audio: UploadFile = File(...)):
     else:
         accion_mqtt_led = "SIN_JSON"
         accion_mqtt_rgb = "SIN_JSON"
+
+    # --- Confirmación por voz según las acciones ejecutadas ---
+
+    try:
+        # Caso 1: LED encendido
+        if accion_mqtt_led == "LED_ON_OK":
+            speak_text("Estoy prendiendo las luces de acuerdo a su ánimo el día de hoy.")
+
+        # Caso 2: LED apagado
+        elif accion_mqtt_led == "LED_OFF_OK":
+            speak_text("Estoy apagando las luces.")
+
+        # Caso 3: CUALQUIER acción RGB correcta
+        elif accion_mqtt_rgb in ("RGB_ALEGRE_OK"):
+            speak_text("Estoy prendiendo las luces de acuerdo a su ánimo el día de hoy.")
+
+        elif accion_mqtt_rgb in ("RGB_TRISTE_OK"):
+            speak_text("Luces prendidas en modo tristeza.")
+
+        elif accion_mqtt_rgb in ("RGB_NEUTRAL_OK"):
+            speak_text("Estoy apagando las luces.")
+
+    except Exception as e:
+        print("[TTS] Error en confirmación de voz:", e)
+
+
 
     return {
         "ok": True,
